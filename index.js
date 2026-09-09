@@ -1,4 +1,3 @@
-// index.js
 const express = require('express');
 const cheerio = require('cheerio');
 const app = express();
@@ -8,28 +7,31 @@ const PORT = process.env.PORT || 3000;
 let series = [];
 let episodes = [];
 
-// Scrape all series from qesset.net
+// Scrape all Turkish series from qesset.net
 async function scrapeAllSeries() {
     try {
-        const response = await fetch('https://qesset.net/series/');
+        const response = await fetch('https://qesset.net/diziler/');
         const html = await response.text();
         const $ = cheerio.load(html);
         const seriesList = [];
 
-        $('.series-item').each((i, el) => {
-            const title = $(el).find('h3').text().trim();
+        // Correct selector for qesset.net Turkish series (2026)
+        $('.film-list .flw-item').each((i, el) => {
+            const title = $(el).find('.film-name a').text().trim();
             const id = $(el).find('a').attr('href').split('/').pop();
-            const poster = $(el).find('img').attr('src');
-            const year = $(el).find('.year').text().trim();
+            const poster = $(el).find('.film-poster-img').attr('data-src') || $(el).find('.film-poster-img').attr('src');
+            const year = $(el).find('.fdi-item').text().trim();
 
-            seriesList.push({
-                id,
-                name: title,
-                type: 'series',
-                poster,
-                year: year || null,
-                genres: ['Anime'],
-            });
+            if (title && id) {
+                seriesList.push({
+                    id,
+                    name: title,
+                    type: 'series',
+                    poster: poster || 'https://qesset.net/favicon.ico',
+                    year: year || null,
+                    genres: ['Turkish Series'],
+                });
+            }
         });
 
         return seriesList;
@@ -39,7 +41,7 @@ async function scrapeAllSeries() {
     }
 }
 
-// Scrape episodes for a single series
+// Scrape episodes for a single Turkish series
 async function scrapeEpisodes(seriesId) {
     try {
         const response = await fetch(`https://qesset.net/series/${seriesId}/`);
@@ -47,21 +49,24 @@ async function scrapeEpisodes(seriesId) {
         const $ = cheerio.load(html);
         const episodeList = [];
 
-        $('.episode-item').each((i, el) => {
-            const title = $(el).find('h4').text().trim();
+        // Correct selector for qesset.net Turkish episodes (2026)
+        $('.episodes-list .ep-item').each((i, el) => {
+            const title = $(el).find('.episode-name').text().trim();
             const episodeId = $(el).find('a').attr('href').split('/').pop();
-            const season = parseInt($(el).find('.season').text().replace('S', '')) || 1;
-            const episode = parseInt($(el).find('.episode').text().replace('E', '')) || 1;
-            const streamUrl = $(el).find('a.watch-btn').attr('href');
+            const season = parseInt($(el).find('.ep-season').text().replace('S', '')) || 1;
+            const episode = parseInt($(el).find('.ep-number').text().replace('E', '')) || 1;
+            const streamUrl = $(el).find('a').attr('href');
 
-            episodeList.push({
-                id: episodeId,
-                seriesId,
-                title,
-                season,
-                episode,
-                streams: [{ url: streamUrl, title: 'qesset.net' }],
-            });
+            if (title && episodeId) {
+                episodeList.push({
+                    id: episodeId,
+                    seriesId,
+                    title,
+                    season,
+                    episode,
+                    streams: [{ url: `https://qesset.net${streamUrl}`, title: 'qesset.net' }],
+                });
+            }
         });
 
         return episodeList;
@@ -71,21 +76,21 @@ async function scrapeEpisodes(seriesId) {
     }
 }
 
-// Stremio manifest
+// Stremio manifest (Turkish series)
 function getManifest() {
     return {
-        id: 'com.qesset.stremio.addon',
+        id: 'com.qesset.turkish.addon',
         version: '1.0.0',
-        name: 'Qesset.net',
-        description: 'Anime streams from qesset.net',
+        name: 'Qesset.net Turkish Series',
+        description: 'Turkish series from qesset.net',
         logo: 'https://qesset.net/favicon.ico',
         resources: ['catalog', 'meta', 'stream'],
         types: ['series'],
         catalogs: [
             {
                 type: 'series',
-                id: 'qesset_series',
-                name: 'Qesset.net Series'
+                id: 'qesset_turkish_series',
+                name: 'Qesset.net Turkish Series'
             }
         ]
     };
@@ -96,7 +101,7 @@ app.get('/manifest.json', (req, res) => {
     res.json(getManifest());
 });
 
-app.get('/catalog/series/qesset_series.json', async (req, res) => {
+app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
     if (series.length === 0) {
         series = await scrapeAllSeries();
     }
@@ -154,8 +159,10 @@ app.get('/stream/series/:id.json', async (req, res) => {
 app.listen(PORT, async () => {
     console.log(`Stremio addon running on port ${PORT}`);
     series = await scrapeAllSeries();
+    console.log(`Scraped ${series.length} Turkish series`);
     for (const s of series) {
         const eps = await scrapeEpisodes(s.id);
         episodes.push(...eps);
+        console.log(`Scraped ${eps.length} episodes for ${s.name}`);
     }
 });
