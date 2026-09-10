@@ -6,12 +6,10 @@ const PORT = process.env.PORT || 3000;
 // Worker URL
 const WORKER_URL = 'https://turkish-series.sara-almheiri.workers.dev/';
 
-// ==========================================
-// CACHING CONFIGURATION
-// ==========================================
-const CACHE_DURATION = 3600000; // 1 Hour in milliseconds
-let series = []; // In-memory storage
-let lastFetched = 0; // Timestamp of last fetch
+// In-memory cache
+let series = {};
+let lastFetched = 0;
+const CACHE_DURATION = 3600000; // 1 Hour
 
 // Check if cache is still valid
 function isCacheValid() {
@@ -19,18 +17,21 @@ function isCacheValid() {
 }
 
 // Fetch from Worker
-async function fetchFromWorker() {
-    const response = await fetch(WORKER_URL);
+async function fetchFromWorker(url) {
+    // Append URL to Worker URL if it contains a path
+    const fullUrl = url.startsWith('http') ? url : WORKER_URL + url;
+    const response = await fetch(fullUrl);
     if (!response.ok) throw new Error(`Worker Error: HTTP ${response.status}`);
     return await response.text();
 }
 
 // Scrape
-async function scrapeAllSeries() {
-    const html = await fetchFromWorker();
+async function scrape(url, catalogId) {
+    const html = await fetchFromWorker(url);
     const $ = cheerio.load(html);
     const seriesList = [];
 
+    // Using discover list selectors
     $('.film-list .flw-item').each((i, el) => {
         const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
         const id = $(el).find('a').attr('href')?.split('/').pop();
@@ -53,40 +54,63 @@ async function scrapeAllSeries() {
 // Stremio Manifest
 function getManifest() {
     return {
-        id: 'com.qesset.turkish.cached',
+        id: 'com.qesset.turkish.discover',
         version: '1.0.0',
-        name: 'Qesset.net Cached',
-        description: 'Turkish Series with Rate Limit Protection',
+        name: 'Qesset.net Discover',
+        description: 'Turkish Series (Discover, Latest, Finished, Movies)',
         logo: 'https://qesset.net/favicon.ico',
         resources: ['catalog'],
         types: ['series'],
-        catalogs: [{
-            type: 'series',
-            id: 'qesset_turkish_series',
-            name: 'Qesset.net Turkish Series'
-        }]
+        catalogs: [
+            {
+                type: 'series',
+                id: 'qesset_turkish_series',
+                name: 'Qesset.net All Series'
+            },
+            {
+                type: 'series',
+                id: 'qesset_latest',
+                name: 'Qesset.net Latest Episodes'
+            },
+            {
+                type: 'series',
+                id: 'qesset_finished',
+                name: 'Qesset.net Finished Series'
+            },
+            {
+                type: 'series',
+                id: 'qesset_movies',
+                name: 'Qesset.net New Movies'
+            }
+        ]
     };
 }
 
 // Routes
 app.get('/manifest.json', (req, res) => res.json(getManifest()));
 
-app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
-    // 1. Check if we have valid cached data
-    if (series.length > 0 && isCacheValid()) {
-        console.log(`Serving cached data (Fetched ${new Date(lastFetched).toLocaleTimeString()})`);
-        return res.json({ metas: series });
+app.get('/catalog/series/:catalogId.json', async (req, res) => {
+    const catalogId = req.params.catalogId;
+    const urls = {
+        'qesset_turkish_series': 'https://qesset.net/discover/',
+        'qesset_latest': 'https://qesset.net/son-bolumler/',
+        'qesset_finished': 'https://qesset.net/category/alarshif/',
+        'qesset_movies': 'https://qesset.net/category/yeni-filmler/'
+    };
+
+    const url = urls[catalogId];
+
+    // Check cache
+    if (series[catalogId] && isCacheValid()) {
+        return res.json({ metas: series[catalogId] });
     }
 
-    // 2. If cache is invalid, fetch fresh data
-    console.log('Cache expired or empty. Fetching fresh data...');
     try {
-        series = await scrapeAllSeries();
+        const data = await scrape(url, catalogId);
+        series[catalogId] = data;
         lastFetched = Date.now();
-        console.log(`Fetched ${series.length} series. Cache expires in 1 hour.`);
-        res.json({ metas: series });
+        res.json({ metas: data });
     } catch (error) {
-        console.error('Cache miss and fetch failed:', error.message);
         res.status(500).json({ metas: [], error: error.message });
     }
 });
@@ -94,8 +118,8 @@ app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
 // Start server
 app.listen(PORT, async () => {
     console.log(`Addon running on port ${PORT}`);
-    // Initial fetch on startup
-    series = await scrapeAllSeries();
+    // Initial fetch
+    series['qesset_turkish_series'] = await scrape('https://qesset.net/discover/', 'qesset_turkish_series');
     lastFetched = Date.now();
-    console.log(`Initial scrape complete. ${series.length} series cached.`);
+    console.log(`Initial fetch complete.`);
 });
