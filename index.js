@@ -3,32 +3,44 @@ const cheerio = require('cheerio');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// REPLACE THIS with your actual Cloudflare Worker URL
+const WORKER_URL = 'https://turkish-series.sara-almheiri.workers.dev/';
+
 // In-memory cache
 let series = [];
 let episodes = [];
 
-// Scrape all Turkish series from qesset.net (2026)
+/**
+ * Fetches HTML from the Cloudflare Worker
+ */
+async function fetchFromWorker() {
+    const response = await fetch(WORKER_URL);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+}
+
+/**
+ * Scrape all Turkish series using the Worker as a proxy
+ */
 async function scrapeAllSeries() {
     try {
-        const response = await fetch('https://qesset.net/turk-dizileri/');
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const html = await response.text();
+        const html = await fetchFromWorker();
         const $ = cheerio.load(html);
         const seriesList = [];
 
+        // 2026 Selectors for qesset.net
         $('.film-list .flw-item').each((i, el) => {
             const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
             const id = $(el).find('a').attr('href').split('/').pop();
-            const poster = $(el).find('.film-poster-img').attr('data-src') || $(el).find('.film-poster-img').attr('src');
-            const year = $(el).find('.fdi-item').first().text().trim();
+            const poster = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
 
             if (title && id) {
                 seriesList.push({
                     id,
                     name: title,
                     type: 'series',
-                    poster: poster || 'https://qesset.net/favicon.ico',
-                    year: year || null,
+                    poster: poster ? (poster.startsWith('http') ? poster : `https://qesset.net${poster}`) : null,
+                    year: null, // qesset.net often puts year in a complex structure, can be added if needed
                     genres: ['Turkish Series'],
                 });
             }
@@ -41,48 +53,13 @@ async function scrapeAllSeries() {
     }
 }
 
-// Scrape episodes for a single Turkish series
-async function scrapeEpisodes(seriesId) {
-    try {
-        const response = await fetch(`https://qesset.net/series/${seriesId}/`);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const html = await response.text();
-        const $ = cheerio.load(html);
-        const episodeList = [];
-
-        $('.episodes-list .ep-item').each((i, el) => {
-            const title = $(el).find('.episode-name').text().trim();
-            const episodeId = $(el).find('a').attr('href').split('/').pop();
-            const season = parseInt($(el).find('.ep-season').text().replace('S', '')) || 1;
-            const episode = parseInt($(el).find('.ep-number').text().replace('E', '')) || 1;
-            const streamUrl = $(el).find('a').attr('href');
-
-            if (title && episodeId) {
-                episodeList.push({
-                    id: episodeId,
-                    seriesId,
-                    title,
-                    season,
-                    episode,
-                    streams: [{ url: `https://qesset.net${streamUrl}`, title: 'qesset.net' }],
-                });
-            }
-        });
-
-        return episodeList;
-    } catch (error) {
-        console.error(`Error scraping episodes for ${seriesId}:`, error.message);
-        return [];
-    }
-}
-
-// Stremio manifest (Turkish series)
+// Stremio Manifest
 function getManifest() {
     return {
         id: 'com.qesset.turkish.addon',
         version: '1.0.0',
         name: 'Qesset.net Turkish Series',
-        description: 'Turkish series from qesset.net (2026)',
+        description: 'Turkish series from qesset.net (2026) via Worker Proxy',
         logo: 'https://qesset.net/favicon.ico',
         resources: ['catalog', 'meta', 'stream'],
         types: ['series'],
@@ -96,12 +73,11 @@ function getManifest() {
     };
 }
 
-// Express routes (FIXED)
+// Express Routes
 app.get('/manifest.json', (req, res) => {
     res.json(getManifest());
 });
 
-// CORRECTED ROUTE: Matches the manifest's catalog ID
 app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
     if (series.length === 0) {
         series = await scrapeAllSeries();
@@ -118,52 +94,9 @@ app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
     });
 });
 
-app.get('/meta/series/:id.json', async (req, res) => {
-    const seriesId = req.params.id;
-    const seriesMeta = series.find(s => s.id === seriesId);
-    if (!seriesMeta) {
-        return res.status(404).json({ error: 'Series not found' });
-    }
-    res.json({
-        meta: {
-            id: seriesMeta.id,
-            name: seriesMeta.name,
-            type: seriesMeta.type,
-            poster: seriesMeta.poster,
-            year: seriesMeta.year,
-            genres: seriesMeta.genres
-        }
-    });
-});
-
-app.get('/stream/series/:id.json', async (req, res) => {
-    const seriesId = req.params.id;
-    if (episodes.length === 0) {
-        for (const s of series) {
-            const eps = await scrapeEpisodes(s.id);
-            episodes.push(...eps);
-        }
-    }
-    const episodeStreams = episodes
-        .filter(e => e.seriesId === seriesId)
-        .map(e => ({
-            id: e.id,
-            title: e.title,
-            season: e.season,
-            episode: e.episode,
-            streams: e.streams
-        }));
-    res.json({ streams: episodeStreams });
-});
-
-// Start the server
+// Start Server
 app.listen(PORT, async () => {
     console.log(`Stremio addon running on port ${PORT}`);
     series = await scrapeAllSeries();
     console.log(`Scraped ${series.length} Turkish series`);
-    for (const s of series) {
-        const eps = await scrapeEpisodes(s.id);
-        episodes.push(...eps);
-        console.log(`Scraped ${eps.length} episodes for ${s.name}`);
-    }
 });
