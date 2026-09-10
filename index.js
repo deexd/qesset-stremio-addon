@@ -7,20 +7,21 @@ const PORT = process.env.PORT || 3000;
 let series = [];
 let episodes = [];
 
-// Scrape all Turkish series from qesset.net
+// Scrape all Turkish series from qesset.net (2026)
 async function scrapeAllSeries() {
     try {
-        const response = await fetch('https://qesset.net/diziler/');
+        const response = await fetch('https://qesset.net/turk-dizileri/');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const html = await response.text();
         const $ = cheerio.load(html);
         const seriesList = [];
 
-        // Correct selector for qesset.net Turkish series (2026)
+        // Correct selector for qesset.net 2026 Turkish series
         $('.film-list .flw-item').each((i, el) => {
-            const title = $(el).find('.film-name a').text().trim();
+            const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
             const id = $(el).find('a').attr('href').split('/').pop();
             const poster = $(el).find('.film-poster-img').attr('data-src') || $(el).find('.film-poster-img').attr('src');
-            const year = $(el).find('.fdi-item').text().trim();
+            const year = $(el).find('.fdi-item').first().text().trim();
 
             if (title && id) {
                 seriesList.push({
@@ -36,7 +37,7 @@ async function scrapeAllSeries() {
 
         return seriesList;
     } catch (error) {
-        console.error('Scraping error:', error);
+        console.error('Scraping error:', error.message);
         return [];
     }
 }
@@ -45,11 +46,12 @@ async function scrapeAllSeries() {
 async function scrapeEpisodes(seriesId) {
     try {
         const response = await fetch(`https://qesset.net/series/${seriesId}/`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const html = await response.text();
         const $ = cheerio.load(html);
         const episodeList = [];
 
-        // Correct selector for qesset.net Turkish episodes (2026)
+        // Correct selector for qesset.net 2026 Turkish episodes
         $('.episodes-list .ep-item').each((i, el) => {
             const title = $(el).find('.episode-name').text().trim();
             const episodeId = $(el).find('a').attr('href').split('/').pop();
@@ -71,7 +73,7 @@ async function scrapeEpisodes(seriesId) {
 
         return episodeList;
     } catch (error) {
-        console.error(`Error scraping episodes for ${seriesId}:`, error);
+        console.error(`Error scraping episodes for ${seriesId}:`, error.message);
         return [];
     }
 }
@@ -82,7 +84,7 @@ function getManifest() {
         id: 'com.qesset.turkish.addon',
         version: '1.0.0',
         name: 'Qesset.net Turkish Series',
-        description: 'Turkish series from qesset.net',
+        description: 'Turkish series from qesset.net (2026)',
         logo: 'https://qesset.net/favicon.ico',
         resources: ['catalog', 'meta', 'stream'],
         types: ['series'],
