@@ -16,7 +16,6 @@ async function scrapeAllSeries() {
         const $ = cheerio.load(html);
         const seriesList = [];
 
-        // Correct selector for qesset.net 2026 Turkish series
         $('.film-list .flw-item').each((i, el) => {
             const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
             const id = $(el).find('a').attr('href').split('/').pop();
@@ -51,7 +50,6 @@ async function scrapeEpisodes(seriesId) {
         const $ = cheerio.load(html);
         const episodeList = [];
 
-        // Correct selector for qesset.net 2026 Turkish episodes
         $('.episodes-list .ep-item').each((i, el) => {
             const title = $(el).find('.episode-name').text().trim();
             const episodeId = $(el).find('a').attr('href').split('/').pop();
@@ -98,11 +96,12 @@ function getManifest() {
     };
 }
 
-// Express routes
+// Express routes (FIXED)
 app.get('/manifest.json', (req, res) => {
     res.json(getManifest());
 });
 
+// CORRECTED ROUTE: Matches the manifest's catalog ID
 app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
     if (series.length === 0) {
         series = await scrapeAllSeries();
