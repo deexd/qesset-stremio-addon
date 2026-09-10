@@ -3,100 +3,99 @@ const cheerio = require('cheerio');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// REPLACE THIS with your actual Cloudflare Worker URL
+// Worker URL
 const WORKER_URL = 'https://turkish-series.sara-almheiri.workers.dev/';
 
-// In-memory cache
-let series = [];
-let episodes = [];
+// ==========================================
+// CACHING CONFIGURATION
+// ==========================================
+const CACHE_DURATION = 3600000; // 1 Hour in milliseconds
+let series = []; // In-memory storage
+let lastFetched = 0; // Timestamp of last fetch
 
-/**
- * Fetches HTML from the Cloudflare Worker
- */
+// Check if cache is still valid
+function isCacheValid() {
+    return (Date.now() - lastFetched) < CACHE_DURATION;
+}
+
+// Fetch from Worker
 async function fetchFromWorker() {
     const response = await fetch(WORKER_URL);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Worker Error: HTTP ${response.status}`);
     return await response.text();
 }
 
-/**
- * Scrape all Turkish series using the Worker as a proxy
- */
+// Scrape
 async function scrapeAllSeries() {
-    try {
-        const html = await fetchFromWorker();
-        const $ = cheerio.load(html);
-        const seriesList = [];
+    const html = await fetchFromWorker();
+    const $ = cheerio.load(html);
+    const seriesList = [];
 
-        // 2026 Selectors for qesset.net
-        $('.film-list .flw-item').each((i, el) => {
-            const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
-            const id = $(el).find('a').attr('href').split('/').pop();
-            const poster = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
+    $('.film-list .flw-item').each((i, el) => {
+        const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
+        const id = $(el).find('a').attr('href')?.split('/').pop();
+        const poster = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
 
-            if (title && id) {
-                seriesList.push({
-                    id,
-                    name: title,
-                    type: 'series',
-                    poster: poster ? (poster.startsWith('http') ? poster : `https://qesset.net${poster}`) : null,
-                    year: null, // qesset.net often puts year in a complex structure, can be added if needed
-                    genres: ['Turkish Series'],
-                });
-            }
-        });
+        if (title && id) {
+            seriesList.push({
+                id,
+                name: title,
+                type: 'series',
+                poster: poster?.startsWith('http') ? poster : `https://qesset.net${poster}`,
+                genres: ['Turkish Series'],
+            });
+        }
+    });
 
-        return seriesList;
-    } catch (error) {
-        console.error('Scraping error:', error.message);
-        return [];
-    }
+    return seriesList;
 }
 
 // Stremio Manifest
 function getManifest() {
     return {
-        id: 'com.qesset.turkish.addon',
+        id: 'com.qesset.turkish.cached',
         version: '1.0.0',
-        name: 'Qesset.net Turkish Series',
-        description: 'Turkish series from qesset.net (2026) via Worker Proxy',
+        name: 'Qesset.net Cached',
+        description: 'Turkish Series with Rate Limit Protection',
         logo: 'https://qesset.net/favicon.ico',
-        resources: ['catalog', 'meta', 'stream'],
+        resources: ['catalog'],
         types: ['series'],
-        catalogs: [
-            {
-                type: 'series',
-                id: 'qesset_turkish_series',
-                name: 'Qesset.net Turkish Series'
-            }
-        ]
+        catalogs: [{
+            type: 'series',
+            id: 'qesset_turkish_series',
+            name: 'Qesset.net Turkish Series'
+        }]
     };
 }
 
-// Express Routes
-app.get('/manifest.json', (req, res) => {
-    res.json(getManifest());
-});
+// Routes
+app.get('/manifest.json', (req, res) => res.json(getManifest()));
 
 app.get('/catalog/series/qesset_turkish_series.json', async (req, res) => {
-    if (series.length === 0) {
-        series = await scrapeAllSeries();
+    // 1. Check if we have valid cached data
+    if (series.length > 0 && isCacheValid()) {
+        console.log(`Serving cached data (Fetched ${new Date(lastFetched).toLocaleTimeString()})`);
+        return res.json({ metas: series });
     }
-    res.json({
-        metas: series.map(s => ({
-            id: s.id,
-            name: s.name,
-            type: s.type,
-            poster: s.poster,
-            year: s.year,
-            genres: s.genres
-        }))
-    });
+
+    // 2. If cache is invalid, fetch fresh data
+    console.log('Cache expired or empty. Fetching fresh data...');
+    try {
+        series = await scrapeAllSeries();
+        lastFetched = Date.now();
+        console.log(`Fetched ${series.length} series. Cache expires in 1 hour.`);
+        res.json({ metas: series });
+    } catch (error) {
+        console.error('Cache miss and fetch failed:', error.message);
+        res.status(500).json({ metas: [], error: error.message });
+    }
 });
 
-// Start Server
+// Start server
 app.listen(PORT, async () => {
-    console.log(`Stremio addon running on port ${PORT}`);
+    console.log(`Addon running on port ${PORT}`);
+    // Initial fetch on startup
     series = await scrapeAllSeries();
-    console.log(`Scraped ${series.length} Turkish series`);
+    lastFetched = Date.now();
+    console.log(`Initial scrape complete. ${series.length} series cached.`);
 });
