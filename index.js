@@ -1,53 +1,37 @@
-const express = require('express');
 const cheerio = require('cheerio');
-const app = express();
-const PORT = process.env.PORT || 3000;
+const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 
-// Worker URL
+// Cloudflare Worker URL (replace with yours)
 const WORKER_URL = 'https://turkish-series.sara-almheiri.workers.dev/';
 
-// In-memory cache
-let series = {};
-let lastFetched = 0;
-const CACHE_DURATION = 3600000; // 1 Hour
-
-// Check if cache is still valid
-function isCacheValid() {
-    return (Date.now() - lastFetched) < CACHE_DURATION;
-}
-
-// Fetch from Worker
 async function fetchFromWorker(url) {
-    // Append URL to Worker URL if it contains a path
-    const fullUrl = url.startsWith('http') ? url : WORKER_URL + url;
-    const response = await fetch(fullUrl);
-    if (!response.ok) throw new Error(`Worker Error: HTTP ${response.status}`);
+    const response = await fetch(WORKER_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+    });
+    if (!response.ok) throw new Error(`Worker Error: ${response.status}`);
     return await response.text();
 }
 
-// Scrape
-async function scrape(url, catalogId) {
+// Scrape all series from /discover/ (handles pagination)
+async function scrapeSeries(url, allSeries = []) {
     const html = await fetchFromWorker(url);
     const $ = cheerio.load(html);
-    const seriesList = [];
 
-    // 2026 qesset.net Structure (Based on your HTML)
     $('article.postEp').each((i, el) => {
         const title = $(el).find('.title').text().trim();
         const href = $(el).find('a').attr('href');
-        const id = href?.split('/').pop();
-        
-        // Extract poster from style="background-image:url(...)"
-        const imgStyle = $(el).find('.imgSer').attr('style');
-        let poster = null;
-        if (imgStyle) {
-            const match = imgStyle.match(/url\(['"]?(.*?)['"]?\)/);
-            if (match) poster = match[1];
-        }
+        const id = href?.split('/').pop().replace(/-/g, '_');
+
+        // Extract poster from inline style
+        const style = $(el).find('.imgSer').attr('style');
+        const posterMatch = style?.match(/url\(['"]?(.*?)['"]?\)/);
+        const poster = posterMatch ? posterMatch[1] : null;
 
         if (title && id) {
-            seriesList.push({
-                id,
+            allSeries.push({
+                id: `qesset_${id}`,
                 name: title,
                 type: 'series',
                 poster: poster?.startsWith('http') ? poster : `https://qesset.net${poster}`,
@@ -56,78 +40,133 @@ async function scrape(url, catalogId) {
         }
     });
 
-    return seriesList;
+    // Check for next page (e.g., /discover/page/2/)
+    const nextPageLink = $('a[href*="/discover/page/"]').last().attr('href');
+    if (nextPageLink) {
+        const nextPageUrl = new URL(nextPageLink, 'https://qesset.net').toString();
+        await scrapeSeries(nextPageUrl, allSeries); // Recursively fetch next page
+    }
+
+    return allSeries;
 }
 
-// Stremio Manifest
-function getManifest() {
-    return {
-        id: 'com.qesset.turkish.discover',
-        version: '1.0.0',
-        name: 'Qesset.net Discover',
-        description: 'Turkish Series (Discover, Latest, Finished, Movies)',
-        logo: 'https://qesset.net/favicon.ico',
-        resources: ['catalog'],
-        types: ['series'],
-        catalogs: [
-            {
-                type: 'series',
-                id: 'qesset_turkish_series',
-                name: 'Qesset.net All Series'
-            },
-            {
-                type: 'series',
-                id: 'qesset_latest',
-                name: 'Qesset.net Latest Episodes'
-            },
-            {
-                type: 'series',
-                id: 'qesset_finished',
-                name: 'Qesset.net Finished Series'
-            },
-            {
-                type: 'series',
-                id: 'qesset_movies',
-                name: 'Qesset.net New Movies'
+// Scrape episodes for a single series
+async function scrapeEpisodes(seriesId) {
+    const seriesSlug = seriesId.replace('qesset_', '').replace(/_/g, '-');
+    const seriesUrl = `https://qesset.net/yeni-show/${seriesSlug}/`;
+    const html = await fetchFromWorker(seriesUrl);
+    const $ = cheerio.load(html);
+    const episodes = [];
+
+    // Find episode links (e.g., /clarus/uzak-sehir-episode-1/)
+    $('a[href*="/clarus/"]').each((i, el) => {
+        const href = $(el).attr('href');
+        const episodeMatch = href?.match(/\/clarus\/.*-episode-(\d+)\/$/);
+        if (!episodeMatch) return;
+
+        const episodeNumber = parseInt(episodeMatch[1]);
+        const episodeId = `${seriesId}_episode_${episodeNumber}`;
+
+        episodes.push({
+            id: episodeId,
+            title: `Episode ${episodeNumber}`,
+            season: 1,
+            episode: episodeNumber,
+            released: new Date().toISOString(),
+        });
+    });
+
+    return episodes;
+}
+
+// Stremio Addon Manifest
+const manifest = {
+    id: 'com.qesset.stremio.addon',
+    version: '1.0.0',
+    name: 'Qesset Turkish Series',
+    description: 'Watch Turkish series from qesset.net on Stremio',
+    catalogs: [
+        {
+            type: 'series',
+            id: 'qesset_turkish_series',
+            name: 'Qesset Turkish Series',
+        },
+    ],
+    resources: ['stream', 'meta', 'catalog'],
+    types: ['series'],
+    idPrefixes: ['qesset_'],
+};
+
+// Stremio Addon Handler
+const builder = new addonBuilder(manifest);
+
+builder.defineCatalogHandler(async ({ type, id }) => {
+    if (type === 'series' && id === 'qesset_turkish_series') {
+        const series = await scrapeSeries('https://qesset.net/discover/');
+        return { metas: series };
+    }
+    return { metas: [] };
+});
+
+builder.defineMetaHandler(async ({ type, id }) => {
+    if (type !== 'series') return { meta: null };
+
+    const series = (await scrapeSeries('https://qesset.net/discover/')).find(s => s.id === id);
+    if (!series) return { meta: null };
+
+    return { meta: series };
+});
+
+builder.defineStreamHandler(async ({ type, id }) => {
+    if (type !== 'series') return { streams: [] };
+
+    const episodeMatch = id.match(/qesset_(.+)_episode_(\d+)/);
+    if (!episodeMatch) return { streams: [] };
+
+    const seriesSlug = episodeMatch[1].replace(/_/g, '-');
+    const episodeNumber = episodeMatch[2];
+    const episodeUrl = `https://qesset.net/clarus/${seriesSlug}-episode-${episodeNumber}/`;
+
+    // Fetch the episode page to extract video sources
+    const html = await fetchFromWorker(episodeUrl);
+    const $ = cheerio.load(html);
+    const streams = [];
+
+    // Extract video sources (adjust selector based on actual HTML)
+    $('video source').each((i, el) => {
+        const src = $(el).attr('src');
+        if (src) {
+            streams.push({
+                url: src,
+                title: `Source ${i + 1}`,
+                behaviorHints: {
+                    proxyHeaders: {
+                        request: {
+                            'Referer': 'https://qesset.net/',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        }
+                    }
+                },
+            });
+        }
+    });
+
+    // Fallback: If no <video> tags, check for iframe/embed
+    if (streams.length === 0) {
+        $('iframe').each((i, el) => {
+            const src = $(el).attr('src');
+            if (src && src.includes('youtube.com') || src.includes('vimeo.com') || src.includes('dailymotion.com')) {
+                streams.push({
+                    url: src,
+                    title: `Embed ${i + 1}`,
+                    behaviorHints: { proxyHeaders: { request: { 'Referer': 'https://qesset.net/' } } },
+                });
             }
-        ]
-    };
-}
-
-// Routes
-app.get('/manifest.json', (req, res) => res.json(getManifest()));
-
-app.get('/catalog/series/:catalogId.json', async (req, res) => {
-    const catalogId = req.params.catalogId;
-    const urls = {
-        'qesset_turkish_series': 'https://qesset.net/discover/',
-        'qesset_latest': 'https://qesset.net/son-bolumler/',
-        'qesset_finished': 'https://qesset.net/category/alarshif/',
-        'qesset_movies': 'https://qesset.net/category/yeni-filmler/'
-    };
-
-    const url = urls[catalogId];
-
-    // Check cache
-    if (series[catalogId] && isCacheValid()) {
-        return res.json({ metas: series[catalogId] });
+        });
     }
 
-    try {
-        const data = await scrape(url, catalogId);
-        series[catalogId] = data;
-        lastFetched = Date.now();
-        res.json({ metas: data });
-    } catch (error) {
-        res.status(500).json({ metas: [], error: error.message });
-    }
+    return { streams };
 });
 
-// Start server
-app.listen(PORT, async () => {
-    console.log(`Addon running on port ${PORT}`);
-    // Initial fetch
-    series['qesset_turkish_series'] = await scrape('https://qesset.net/discover/', 'qesset_turkish_series');
-    lastFetched = Date.now();
-    console.log(`Initial fetch complete.`);
-});
+// Start the addon
+serveHTTP(builder.getInterface(), { port: process.env.PORT || 3000 });
