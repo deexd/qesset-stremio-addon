@@ -31,11 +31,19 @@ async function scrape(url, catalogId) {
     const $ = cheerio.load(html);
     const seriesList = [];
 
-    // Using discover list selectors
-    $('.film-list .flw-item').each((i, el) => {
-        const title = $(el).find('.film-name a').attr('title') || $(el).find('.film-name a').text().trim();
-        const id = $(el).find('a').attr('href')?.split('/').pop();
-        const poster = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
+    // 2026 qesset.net Structure (Based on your HTML)
+    $('article.postEp').each((i, el) => {
+        const title = $(el).find('.title').text().trim();
+        const href = $(el).find('a').attr('href');
+        const id = href?.split('/').pop();
+        
+        // Extract poster from style="background-image:url(...)"
+        const imgStyle = $(el).find('.imgSer').attr('style');
+        let poster = null;
+        if (imgStyle) {
+            const match = imgStyle.match(/url\(['"]?(.*?)['"]?\)/);
+            if (match) poster = match[1];
+        }
 
         if (title && id) {
             seriesList.push({
